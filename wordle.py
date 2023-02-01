@@ -46,6 +46,8 @@ def wordle(message):
             user_score += int(curr_score['score'])
             input_data.update_one({"user_id": int(user_id), "chat_id": int(chat_id)}, {"$set": {"score": user_score}})
             bot.reply_to(message, "Congrats Wordler your current score is " + str(user_score) + ".\n")
+        elif len(re.findall("[X]\/", message.text)) != 0:
+            bot.reply_to(message, "0 Score?. RIP.")
         else:
             bot.reply_to(message, "Score incorrectly formatted")
     else:
