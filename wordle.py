@@ -93,6 +93,25 @@ def scoreboard(message):
 
     bot.reply_to(message, message_text)
 
+
+@bot.message_handler(commands=["resetscore"])
+def resetscore(message):
+    db = cluster["wordle_db"]
+    collection = db["user_data"]
+
+    if bot.get_chat_member(message.chat.id, message.from_user.id).status == "creator" or bot.get_chat_member(message.chat.id, message.from_user.id).status == "administrator":
+        collection.update_many(
+            {"score": { "$gt": 0 }, 
+            "chat_id": {"$eq": int(message.chat.id)}},
+                {
+                    "$set": { "score" : 0 }
+                }
+        )
+        bot.reply_to(message, "Scores have successfully been reset.")
+    else:
+        bot.reply_to(message, "Error. You do not have the proper permissions to perform this command.")
+    return
+
 @bot.message_handler(commands=["help"])
 def help(message):
     bot.reply_to(message, (" Welcome to Wordle Bot for Telegram!\n" 
