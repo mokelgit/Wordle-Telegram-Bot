@@ -1,130 +1,139 @@
 from cgitb import text
 import telebot
-import config
+import psycopg2
+from psycopg2 import Error
+from config import db_config, telegram_token
 import re
-from pymongo import MongoClient
-from bson.objectid import ObjectId
 
-cluster = MongoClient(config.connect_mongodb())
-bot = telebot.TeleBot(config.get_api())
+# Initialize Telegram Bot with your token
+bot = telebot.TeleBot(telegram_token)
+
+# Database connection parameters from config.py
+db_name = db_config['dbname']
+db_user = db_config['user']
+db_password = db_config['password']
+db_host = db_config['host']
+db_port = db_config['port']
+
+def get_db_connection():
+    try:
+        connection = psycopg2.connect(
+            user=db_user,
+            password=db_password,
+            host=db_host,
+            port=db_port,
+            database=db_name
+        )
+        return connection
+    except (Exception, Error) as error:
+        print("Error while connecting to PostgreSQL", error)
+        return None
 
 @bot.message_handler(commands=['joinleague'])
 def handle_messages(message):
-    input_data = cluster.wordle_db.user_data
     user_at = message.from_user.username
     chat_id = message.chat.id
     user_id = message.from_user.id
-    #pull user data from message
-    input_score = message.text.replace("/joinleague ", '')
-    if input_data.find_one({"user_id": int(user_id), "chat_id": int(chat_id)}) == None:
-        if re.search("[0-9]{1,4}", input_score):
-            input_data.insert_one({"user_id": int(user_id), "chat_id": int(chat_id), "score": int(input_score), "user_at": str(user_at)})
-            bot.reply_to(message, "Welcome to wordle league!")
-            #if user is not found in query enter their new data
+    input_score = message.text.replace("/joinleague ", '').strip()
+
+    connection = get_db_connection()
+    if connection:
+        cursor = connection.cursor()
+        cursor.execute("SELECT * FROM users WHERE user_id = %s AND chat_id = %s;", (user_id, chat_id))
+        users = cursor.fetchone()
+
+        if users is None:
+            if re.search(r"^\d{1,4}$", input_score):
+                cursor.execute(
+                    "INSERT INTO users (user_id, chat_id, score, username) VALUES (%s, %s, %s, %s);",
+                    (user_id, chat_id, int(input_score), user_at)
+                )
+                connection.commit()
+                bot.reply_to(message, "Welcome to wordle league!")
+            else:
+                bot.reply_to(message, "Incorrect score input. Please enter your score when entering the league. If you have no score, please enter 0.")
         else:
-            bot.reply_to(message, "Incorrect score input. Please enter your score when entering \nthe league. If you have no score please enter 0.")
-    else:
-        bot.reply_to(message, "You are already in this league.")
+            bot.reply_to(message, "You are already in this league.")
 
-
+        cursor.close()
+        connection.close()
 
 @bot.message_handler(commands=["wordle"])
 def wordle(message):
-    input_data = cluster.wordle_db.user_data
     chat_id = message.chat.id
     user_id = message.from_user.id
-    curr_score = input_data.find_one({"user_id": int(user_id), "chat_id": int(chat_id)})
 
-    if curr_score != None:
-        if len(re.findall("[1-6]\/", message.text)) != 0:
-            user_score = re.findall("[1-6]\/", message.text)
-            user_score = re.findall("[1-6]", user_score[0])
-            user_score = int(user_score[0])
-            user_score = 6 - (user_score - 1)
-            #extract the score using regex
+    connection = get_db_connection()
+    if connection:
+        cursor = connection.cursor()
+        cursor.execute("SELECT score FROM users WHERE user_id = %s AND chat_id = %s;", (user_id, chat_id))
+        curr_score = cursor.fetchone()
 
-            user_score += int(curr_score['score'])
-            input_data.update_one({"user_id": int(user_id), "chat_id": int(chat_id)}, {"$set": {"score": user_score}})
-            bot.reply_to(message, "Congrats Wordler your current score is " + str(user_score) + ".\n")
-        elif len(re.findall("[X]\/", message.text)) != 0:
-            bot.reply_to(message, "0 Score?. RIP.")
+        if curr_score:
+            curr_score = curr_score[0]
+            if re.search(r"[1-6]/", message.text):
+                user_score = re.findall("[1-6]\/", message.text)
+                user_score = re.findall("[1-6]", user_score[0])
+                user_score = int(user_score[0])
+                user_score = 6 - (user_score - 1)
+                new_score = curr_score + user_score
+
+                cursor.execute("UPDATE users SET score = %s WHERE user_id = %s AND chat_id = %s;", (new_score, user_id, chat_id))
+                connection.commit()
+                bot.reply_to(message, f"Congrats Wordler your current score is {new_score}.\n")
+            elif re.search(r"X/", message.text):
+                bot.reply_to(message, "0 Score?. RIP.")
+            else:
+                bot.reply_to(message, "Score incorrectly formatted")
         else:
-            bot.reply_to(message, "Score incorrectly formatted")
-    else:
-        bot.reply_to(message, "You are not currently in this league please join befor entering scores.")
-    
+            bot.reply_to(message, "You are not currently in this league please join before entering scores.")
+
+        cursor.close()
+        connection.close()
 
 @bot.message_handler(commands=["scoreboard"])
 def scoreboard(message):
     chat_id = message.chat.id
-    chat_data = cluster.wordle_db.user_data.find({"chat_id": int(chat_id)})
-    scores = []
-    names = []
-    message_text = ""
-    for user in chat_data:
-        scores.append(user['score'])
-        names.append(user['user_at'])
-    #assign user values to lists for sorting
-    for i in range(len(scores)):
-    
-        # Find the minimum element in remaining
-        # unsorted array
-        min_idx = i
-        for j in range(i+1, len(scores)):
-            if scores[min_idx] < scores[j]:
-                min_idx = j
-            
-        # Swap the found minimum element with
-        # the first element  
-        scores[i], scores[min_idx] = scores[min_idx], scores[i]
-        names[i], names[min_idx] = names[min_idx], names[i]
-    #selection sort names and scores
-    
-    for i in range(len(scores)):
-        score_index = i + 1
-        if i != 0:
-            if scores[i] == scores[i - 1]:
-                score_index = i
+    connection = get_db_connection()
+    if connection:
+        cursor = connection.cursor()
+        cursor.execute("SELECT username, score FROM users WHERE chat_id = %s ORDER BY score DESC;", (chat_id,))
+        chat_data = cursor.fetchall()
 
+        message_text = ""
+        for idx, (username, score) in enumerate(chat_data, 1):
+            message_text += f"{idx}. {username}: {score} pts.\n"
 
-        message_text += str(score_index) + ". " + str(names[i]) + ":    " + str(scores[i]) + " pts.\n"
-            
-    
+        bot.reply_to(message, message_text)
 
-    bot.reply_to(message, message_text)
-
+        cursor.close()
+        connection.close()
 
 @bot.message_handler(commands=["resetscore"])
 def resetscore(message):
-    db = cluster["wordle_db"]
-    collection = db["user_data"]
+    connection = get_db_connection()
+    if connection:
+        cursor = connection.cursor()
+        status = bot.get_chat_member(message.chat.id, message.from_user.id).status
 
-    if bot.get_chat_member(message.chat.id, message.from_user.id).status == "creator" or bot.get_chat_member(message.chat.id, message.from_user.id).status == "administrator":
-        collection.update_many(
-            {"score": { "$gt": 0 }, 
-            "chat_id": {"$eq": int(message.chat.id)}},
-                {
-                    "$set": { "score" : 0 }
-                }
-        )
-        bot.reply_to(message, "Scores have successfully been reset.")
-    else:
-        bot.reply_to(message, "Error. You do not have the proper permissions to perform this command.")
-    return
+        if status == "creator" or status == "administrator":
+            cursor.execute("UPDATE users SET score = 0 WHERE chat_id = %s;", (message.chat.id,))
+            connection.commit()
+            bot.reply_to(message, "Scores have successfully been reset.")
+        else:
+            bot.reply_to(message, "Error. You do not have the proper permissions to perform this command.")
+
+        cursor.close()
+        connection.close()
 
 @bot.message_handler(commands=["help"])
 def help(message):
-    bot.reply_to(message, (" Welcome to Wordle Bot for Telegram!\n" 
-                    
-                             
-                          "Currently functioning commands are\n\n"
-                          "/joinleague [score] (Enter your overall score for the current league following the joinleague command).\n\n"
-                          "/wordle [Wordle Score] This is where you insert your scores for each day. This can just be your same old wordle copy and pasted from the site.\n\n"
-                          "/scoreboard(Displays everyones scores in order)\n\n"
-                          
-                           ))
-        
-
-
+    bot.reply_to(message, (
+        "Welcome to Wordle Bot for Telegram!\n\n"
+        "Currently functioning commands are:\n"
+        "/joinleague [score] (Enter your overall score for the current league following the joinleague command).\n"
+        "/wordle [Wordle Score] (Insert your scores for each day. Copy and paste from the site).\n"
+        "/scoreboard (Displays everyone's scores in order).\n"
+    ))
 
 bot.infinity_polling()
